@@ -74,10 +74,12 @@ const (
 	// where locals are mirrored inside try_table bodies, so that handler blocks
 	// can read throw-time local values after stack-clone restore.
 	ExecutionContextOffsetLocalsSaveAreaPtr Offset = 1240
+	// ExecutionContextOffsetMemclrAddress is the offset of `memclrAddress` in executionContext.
+	ExecutionContextOffsetMemclrAddress Offset = 1248
 	// ExecutionContextOffsetModuleClosedPtr is an offset of `moduleClosedPtr` field in wazevo.executionContext:
 	// the address of the calling module instance's Closed word, which compiled code tests
 	// at loop back-edges and function entries when ensureTermination is enabled.
-	ExecutionContextOffsetModuleClosedPtr Offset = 1248
+	ExecutionContextOffsetModuleClosedPtr Offset = 1256
 	// ExecutionContextOffsetInterruptCounter is an offset of `interruptCounter` field in wazevo.executionContext.
 	// Compiled loop back-edges and function entries increment it when ensureTermination is
 	// enabled, and exit to the checkModuleExitCode trampoline every N checks regardless of the
@@ -85,7 +87,7 @@ const (
 	// The Go runtime cannot asynchronously preempt goroutines executing wazevo-generated machine
 	// code, so that unconditional exit is the only safepoint inside wasm code: without it, a
 	// spinning module would never yield, and stop-the-world GC would livelock waiting on it.
-	ExecutionContextOffsetInterruptCounter Offset = 1256
+	ExecutionContextOffsetInterruptCounter Offset = 1264
 )
 
 // ModuleContextOffsetData allows the compilers to get the information about offsets to the fields of wazevo.moduleContextOpaque,

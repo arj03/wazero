@@ -144,6 +144,9 @@ type (
 		// localsSaveAreaPtr points to the tryHandler's localsSaveArea slice
 		// backing array. Handlers load locals from this slice.
 		localsSaveAreaPtr uintptr
+		// memclrAddress holds the address of memclrNoHeapPointers implemented
+		// by the Go runtime. See memclr.go.
+		memclrAddress uintptr
 		// moduleClosedPtr is the address of the calling module instance's Closed word
 		// (wasm.ModuleInstance.Closed), set per call when ensureTermination is enabled.
 		// Compiled loop back-edges and function entries load it and call the
