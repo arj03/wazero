@@ -397,6 +397,13 @@ func (c *compiler) compile(sig *wasm.FunctionType, body []byte, localTypes []was
 		kind:      controlFrameKindFunction,
 	})
 
+	// A loop back-edge is not the only unbounded path: a loop-free call tree runs 2^depth
+	// calls at a fixed stack depth, and return_call self-recursion runs forever at a fixed
+	// depth too. Checking on entry bounds both, since every call form lands here.
+	if c.ensureTermination {
+		c.emit(newOperationBuiltinFunctionCheckExitCode())
+	}
+
 	// Now, enter the function body.
 	for !c.controlFrames.empty() && c.pc < uint64(len(c.body)) {
 		if err := c.handleInstruction(); err != nil {

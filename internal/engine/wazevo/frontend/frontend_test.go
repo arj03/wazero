@@ -259,31 +259,34 @@ signatures:
 blk0: (exec_ctx:i64, module_ctx:i64)
 	Jump blk1
 
-blk1: () <-- (blk0,blk5)
+blk1: () <-- (blk0)
+	Jump blk2
+
+blk2: () <-- (blk1,blk6)
 	v2:i64 = Load exec_ctx, 0x4e0
 	v3:i64 = Load v2, 0x0
-	Brnz v3, blk3
-	Jump blk4
-
-blk2: ()
-
-blk3: () <-- (blk1,blk4)
-	v9:i64 = Load exec_ctx, 0x58
-	CallIndirect v9:sig2, exec_ctx
+	Brnz v3, blk4
 	Jump blk5
 
-blk4: () <-- (blk1)
+blk3: ()
+
+blk4: () <-- (blk2,blk5)
+	v9:i64 = Load exec_ctx, 0x58
+	CallIndirect v9:sig2, exec_ctx
+	Jump blk6
+
+blk5: () <-- (blk2)
 	v4:i64 = Load exec_ctx, 0x4e8
 	v5:i64 = Iconst_64 0x1
 	v6:i64 = Iadd v4, v5
 	Store v6, exec_ctx, 0x4e8
 	v7:i64 = Iconst_64 0xff
 	v8:i64 = Band v6, v7
-	Brz v8, blk3
-	Jump blk5
+	Brz v8, blk4
+	Jump blk6
 
-blk5: () <-- (blk4,blk3)
-	Jump blk1
+blk6: () <-- (blk5,blk4)
+	Jump blk2
 `,
 			expAfterPasses: `
 signatures:
@@ -292,38 +295,41 @@ signatures:
 blk0: (exec_ctx:i64, module_ctx:i64)
 	Jump fallthrough
 
-blk1: () <-- (blk0,blk5)
-	v2:i64 = Load exec_ctx, 0x4e0
-	v3:i64 = Load v2, 0x0
-	Brnz v3, blk6
+blk1: () <-- (blk0)
 	Jump fallthrough
 
-blk4: () <-- (blk1)
+blk2: () <-- (blk1,blk6)
+	v2:i64 = Load exec_ctx, 0x4e0
+	v3:i64 = Load v2, 0x0
+	Brnz v3, blk7
+	Jump fallthrough
+
+blk5: () <-- (blk2)
 	v4:i64 = Load exec_ctx, 0x4e8
 	v5:i64 = Iconst_64 0x1
 	v6:i64 = Iadd v4, v5
 	Store v6, exec_ctx, 0x4e8
 	v7:i64 = Iconst_64 0xff
 	v8:i64 = Band v6, v7
-	Brnz v8, blk8
+	Brnz v8, blk9
 	Jump fallthrough
 
-blk7: () <-- (blk4)
-	Jump blk3
+blk8: () <-- (blk5)
+	Jump blk4
 
-blk6: () <-- (blk1)
+blk7: () <-- (blk2)
 	Jump fallthrough
 
-blk3: () <-- (blk6,blk7)
+blk4: () <-- (blk7,blk8)
 	v9:i64 = Load exec_ctx, 0x58
 	CallIndirect v9:sig2, exec_ctx
-	Jump blk5
+	Jump blk6
 
-blk8: () <-- (blk4)
+blk9: () <-- (blk5)
 	Jump fallthrough
 
-blk5: () <-- (blk8,blk3)
-	Jump blk1
+blk6: () <-- (blk9,blk4)
+	Jump blk2
 `,
 		},
 		{
@@ -584,6 +590,50 @@ blk4: () <-- (blk1)
 blk3: () <-- (blk4)
 	v4:i32 = Iconst_32 0x1
 	Jump blk1, v4
+`,
+		},
+		{
+			// A function that calls is checked on entry: loops are not the only way to run long.
+			name:              "call / ensure termination",
+			m:                 testcases.Call.Module,
+			ensureTermination: true,
+			exp: `
+signatures:
+	sig1: i64i64_i32
+	sig2: i64i64i32i32_i32
+	sig3: i64i64i32_i32i32
+	sig5: i64_v
+
+blk0: (exec_ctx:i64, module_ctx:i64)
+	v7:i64 = Load exec_ctx, 0x4e0
+	v8:i64 = Load v7, 0x0
+	Brnz v8, blk2
+	Jump blk3
+
+blk1: () <-- (blk4)
+	v2:i32 = Call f1:sig1, exec_ctx, module_ctx
+	v3:i32 = Iconst_32 0x5
+	v4:i32 = Call f2:sig2, exec_ctx, module_ctx, v2, v3
+	v5:i32, v6:i32 = Call f3:sig3, exec_ctx, module_ctx, v4
+	Jump blk_ret, v5, v6
+
+blk2: () <-- (blk0,blk3)
+	v14:i64 = Load exec_ctx, 0x58
+	CallIndirect v14:sig5, exec_ctx
+	Jump blk4
+
+blk3: () <-- (blk0)
+	v9:i64 = Load exec_ctx, 0x4e8
+	v10:i64 = Iconst_64 0x1
+	v11:i64 = Iadd v9, v10
+	Store v11, exec_ctx, 0x4e8
+	v12:i64 = Iconst_64 0xff
+	v13:i64 = Band v11, v12
+	Brz v13, blk2
+	Jump blk4
+
+blk4: () <-- (blk3,blk2)
+	Jump blk1
 `,
 		},
 		{

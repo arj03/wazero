@@ -297,7 +297,7 @@ func (b *builder) Init(s *Signature) {
 	b.nextValueID = 0
 	b.reversePostOrderedBasicBlocks = b.reversePostOrderedBasicBlocks[:0]
 	b.doneBlockLayout = false
-	b.currentSourceOffset = sourceOffsetUnknown
+	b.currentSourceOffset = SourceOffsetUnknown
 }
 
 // Signature implements Builder.Signature.

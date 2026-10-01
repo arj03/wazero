@@ -42,11 +42,12 @@ type Instruction struct {
 // SourceOffset represents the offset of the source of an instruction.
 type SourceOffset int64
 
-const sourceOffsetUnknown = -1
+// SourceOffsetUnknown is the offset of an instruction that maps to no place in the source.
+const SourceOffsetUnknown = -1
 
 // Valid returns true if this source offset is valid.
 func (l SourceOffset) Valid() bool {
-	return l != sourceOffsetUnknown
+	return l != SourceOffsetUnknown
 }
 
 func (i *Instruction) annotateSourceOffset(line SourceOffset) {
@@ -87,7 +88,7 @@ func resetInstruction(i *Instruction) {
 	i.rValue = ValueInvalid
 	i.typ = typeInvalid
 	i.vs = ValuesNil
-	i.sourceOffset = sourceOffsetUnknown
+	i.sourceOffset = SourceOffsetUnknown
 }
 
 // InstructionGroupID is assigned to each instruction and represents a group of instructions

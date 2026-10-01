@@ -14,9 +14,10 @@ import (
 	"github.com/tetratelabs/wazero/internal/wasm"
 )
 
-// interruptCheckInterval is the number of loop back-edges between two unconditional exits
-// to Go code when ensureTermination is enabled. See the loop lowering below: the exit is
-// there to be a safepoint, not to check anything, since the Closed test on every back-edge
+// interruptCheckInterval is the number of termination checks (loop back-edges and function
+// entries) between two unconditional exits to Go code when ensureTermination is enabled. See
+// insertTerminationCheck: the exit is
+// there to be a safepoint, not to check anything, since the Closed test on every check
 // already handles interruption. So the interval trades throughput against how long the rest
 // of the process waits on a spinning module -- a stop-the-world GC in particular, which has
 // to meet every wasm goroutine several times before it can finish, and so waits for rather
@@ -39,6 +40,8 @@ type (
 		unreachableDepth int
 		tmpForBrTable    []uint32
 		pc               int
+		// calls is true once the function has lowered a call of any form.
+		calls bool
 	}
 	controlFrame struct {
 		kind controlFrameKind
@@ -122,6 +125,7 @@ func (l *loweringState) reset() {
 	l.pc = 0
 	l.unreachable = false
 	l.unreachableDepth = 0
+	l.calls = false
 }
 
 func (l *loweringState) peek() (ret ssa.Value) {
@@ -170,7 +174,23 @@ func (l *loweringState) ctrlPeekAt(n int) (ret *controlFrame) {
 
 // lowerBody lowers the body of the Wasm function to the SSA form.
 func (c *Compiler) lowerBody(entryBlk ssa.BasicBlock) {
-	c.ssaBuilder.Seal(entryBlk)
+	builder := c.ssaBuilder
+	builder.Seal(entryBlk)
+
+	// A loop back-edge is not the only unbounded path. A loop-free call tree (f calls g
+	// twice, g calls h twice, ...) runs 2^depth calls at a fixed stack depth, and return_call
+	// self-recursion runs forever at a fixed depth too. Checking on entry bounds both, and
+	// covers every call form since they all land here.
+	//
+	// Only a function that itself calls needs it. One that does not cannot extend a call
+	// chain: it runs its own code, whose loops are checked, and returns to a caller that was.
+	// Whether it calls is known only once the body is lowered, so the body goes in its own
+	// block and the entry block is completed afterwards.
+	var bodyBlk ssa.BasicBlock
+	if c.ensureTermination {
+		bodyBlk = builder.AllocateBasicBlock()
+		builder.SetCurrentBlock(bodyBlk)
+	}
 
 	if c.needListener {
 		c.callListenerBefore()
@@ -194,6 +214,18 @@ func (c *Compiler) lowerBody(entryBlk ssa.BasicBlock) {
 			// After that, we initialize the known bounds for the new compilation target block.
 			c.initializeCurrentBlockKnownBounds()
 		}
+	}
+
+	if c.ensureTermination {
+		builder.SetCurrentBlock(entryBlk)
+		// What goes in the entry block belongs to no opcode, as it would have had it been
+		// emitted first.
+		builder.SetCurrentSourceOffset(ssa.SourceOffsetUnknown)
+		if c.loweringState.calls {
+			c.insertTerminationCheck()
+		}
+		builder.AllocateInstruction().AsJump(ssa.ValuesNil, bodyBlk).Insert(builder)
+		builder.Seal(bodyBlk)
 	}
 }
 
@@ -1381,78 +1413,7 @@ func (c *Compiler) lowerCurrentOpcode() {
 		c.switchTo(originalLen, loopHeader)
 
 		if c.ensureTermination {
-			// Test the module's closed state inline, and exit to the host only when it
-			// is set. What the checkModuleExitCode trampoline goes to Go to fetch is a
-			// single word (wasm.ModuleInstance.Closed, whose address the call engine puts
-			// in the execution context), so read it here and keep the trampoline call on
-			// the cold path. Exiting from native code on every back-edge is what makes
-			// ensureTermination cost multiples on loop-heavy modules; the check itself is
-			// a load and a well-predicted branch.
-			closedPtr := builder.AllocateInstruction().
-				AsLoad(c.execCtxPtrValue,
-					wazevoapi.ExecutionContextOffsetModuleClosedPtr.U32(),
-					ssa.TypeI64,
-				).Insert(builder).Return()
-			closed := builder.AllocateInstruction().
-				AsLoad(closedPtr, 0, ssa.TypeI64).Insert(builder).Return()
-
-			checkBlk, counterBlk, afterBlk :=
-				builder.AllocateBasicBlock(), builder.AllocateBasicBlock(), builder.AllocateBasicBlock()
-
-			builder.AllocateInstruction().AsBrnz(closed, ssa.ValuesNil, checkBlk).Insert(builder)
-			builder.AllocateInstruction().AsJump(ssa.ValuesNil, counterBlk).Insert(builder)
-
-			// The Closed test above is prompt, but conditional: it exits to Go only when
-			// the module was actually closed. That cannot be the only exit from native
-			// code, because the Go runtime cannot asynchronously preempt a goroutine
-			// executing wazevo-generated machine code. A spinning loop would then never
-			// reach a safepoint, and a stop-the-world GC would livelock on it, freezing
-			// the goroutine that would deliver the close. So also exit to Go
-			// unconditionally every interruptCheckInterval back-edges: when Closed is
-			// clear the trampoline returns immediately, and the round trip through Go
-			// code is itself the safepoint.
-			//
-			// The counter lives in its own block so that each test stays a single fused
-			// compare-and-branch: LowerConditionalBranch only folds a comparison into the
-			// branch when it is the branch's direct operand, so combining the two tests
-			// into one condition would instead materialize both through cset/setcc.
-			builder.SetCurrentBlock(counterBlk)
-			counter := builder.AllocateInstruction().
-				AsLoad(c.execCtxPtrValue,
-					wazevoapi.ExecutionContextOffsetInterruptCounter.U32(),
-					ssa.TypeI64,
-				).Insert(builder).Return()
-			one := builder.AllocateInstruction().AsIconst64(1).Insert(builder).Return()
-			next := builder.AllocateInstruction().AsIadd(counter, one).Insert(builder).Return()
-			builder.AllocateInstruction().
-				AsStore(ssa.OpcodeStore, next, c.execCtxPtrValue,
-					wazevoapi.ExecutionContextOffsetInterruptCounter.U32()).
-				Insert(builder)
-			maskVal := builder.AllocateInstruction().
-				AsIconst64(interruptCheckInterval - 1).Insert(builder).Return()
-			masked := builder.AllocateInstruction().AsBand(next, maskVal).Insert(builder).Return()
-			brz := builder.AllocateInstruction()
-			brz.AsBrz(masked, ssa.ValuesNil, checkBlk)
-			brz.Insert(builder)
-			builder.AllocateInstruction().AsJump(ssa.ValuesNil, afterBlk).Insert(builder)
-			builder.Seal(counterBlk)
-
-			builder.SetCurrentBlock(checkBlk)
-			checkModuleExitCodePtr := builder.AllocateInstruction().
-				AsLoad(c.execCtxPtrValue,
-					wazevoapi.ExecutionContextOffsetCheckModuleExitCodeTrampolineAddress.U32(),
-					ssa.TypeI64,
-				).Insert(builder).Return()
-
-			args := c.allocateVarLengthValues(1, c.execCtxPtrValue)
-			builder.AllocateInstruction().
-				AsCallIndirect(checkModuleExitCodePtr, &c.checkModuleExitCodeSig, args).
-				Insert(builder)
-			builder.AllocateInstruction().AsJump(ssa.ValuesNil, afterBlk).Insert(builder)
-
-			builder.Seal(checkBlk)
-			builder.SetCurrentBlock(afterBlk)
-			builder.Seal(afterBlk)
+			c.insertTerminationCheck()
 		}
 	case wasm.OpcodeIf:
 		bt := c.readBlockType()
@@ -4028,6 +3989,7 @@ func (c *Compiler) lowerAccessTableWithBoundsCheck(tableIndex uint32, elementOff
 func (c *Compiler) prepareCall(fnIndex uint32) (isIndirect bool, sig *ssa.Signature, args ssa.Values, funcRefOrPtrValue uint64) {
 	builder := c.ssaBuilder
 	state := c.state()
+	state.calls = true
 	var typIndex wasm.Index
 	if fnIndex < c.m.ImportFunctionCount {
 		// Before transfer the control to the callee, we have to store the current module's moduleContextPtr
@@ -4104,6 +4066,7 @@ func (c *Compiler) lowerCall(fnIndex uint32) {
 func (c *Compiler) prepareCallIndirect(typeIndex, tableIndex uint32) (ssa.Value, *wasm.FunctionType, ssa.Values) {
 	builder := c.ssaBuilder
 	state := c.state()
+	state.calls = true
 
 	elementOffsetInTable := state.pop()
 	functionInstancePtrAddress := c.lowerAccessTableWithBoundsCheck(tableIndex, elementOffsetInTable)
@@ -4251,6 +4214,7 @@ func (c *Compiler) lowerTailCallReturnCallIndirect(typeIndex, tableIndex uint32)
 func (c *Compiler) prepareCallRef(typeIndex uint32) (ssa.Value, *wasm.FunctionType, ssa.Values) {
 	builder := c.ssaBuilder
 	state := c.state()
+	state.calls = true
 
 	functionInstancePtr := state.pop()
 
@@ -4970,6 +4934,86 @@ func (c *Compiler) readMemArg() (align, offset uint32) {
 
 	state.pc += int(num)
 	return align, offset
+}
+
+// insertTerminationCheck emits the ensureTermination check into the current block and leaves
+// the builder in the block that follows it. It goes wherever compiled code can otherwise run
+// unboundedly: at every loop header and at the entry of every function that makes calls.
+func (c *Compiler) insertTerminationCheck() {
+	builder := c.ssaBuilder
+
+	// Test the module's closed state inline, and exit to the host only when it
+	// is set. What the checkModuleExitCode trampoline goes to Go to fetch is a
+	// single word (wasm.ModuleInstance.Closed, whose address the call engine puts
+	// in the execution context), so read it here and keep the trampoline call on
+	// the cold path. Exiting from native code on every check is what makes
+	// ensureTermination cost multiples on loop-heavy modules; the check itself is
+	// a load and a well-predicted branch.
+	closedPtr := builder.AllocateInstruction().
+		AsLoad(c.execCtxPtrValue,
+			wazevoapi.ExecutionContextOffsetModuleClosedPtr.U32(),
+			ssa.TypeI64,
+		).Insert(builder).Return()
+	closed := builder.AllocateInstruction().
+		AsLoad(closedPtr, 0, ssa.TypeI64).Insert(builder).Return()
+
+	checkBlk, counterBlk, afterBlk :=
+		builder.AllocateBasicBlock(), builder.AllocateBasicBlock(), builder.AllocateBasicBlock()
+
+	builder.AllocateInstruction().AsBrnz(closed, ssa.ValuesNil, checkBlk).Insert(builder)
+	builder.AllocateInstruction().AsJump(ssa.ValuesNil, counterBlk).Insert(builder)
+
+	// The Closed test above is prompt, but conditional: it exits to Go only when
+	// the module was actually closed. That cannot be the only exit from native
+	// code, because the Go runtime cannot asynchronously preempt a goroutine
+	// executing wazevo-generated machine code. A spinning module would then never
+	// reach a safepoint, and a stop-the-world GC would livelock on it, freezing
+	// the goroutine that would deliver the close. So also exit to Go
+	// unconditionally every interruptCheckInterval checks: when Closed is
+	// clear the trampoline returns immediately, and the round trip through Go
+	// code is itself the safepoint.
+	//
+	// The counter lives in its own block so that each test stays a single fused
+	// compare-and-branch: LowerConditionalBranch only folds a comparison into the
+	// branch when it is the branch's direct operand, so combining the two tests
+	// into one condition would instead materialize both through cset/setcc.
+	builder.SetCurrentBlock(counterBlk)
+	counter := builder.AllocateInstruction().
+		AsLoad(c.execCtxPtrValue,
+			wazevoapi.ExecutionContextOffsetInterruptCounter.U32(),
+			ssa.TypeI64,
+		).Insert(builder).Return()
+	one := builder.AllocateInstruction().AsIconst64(1).Insert(builder).Return()
+	next := builder.AllocateInstruction().AsIadd(counter, one).Insert(builder).Return()
+	builder.AllocateInstruction().
+		AsStore(ssa.OpcodeStore, next, c.execCtxPtrValue,
+			wazevoapi.ExecutionContextOffsetInterruptCounter.U32()).
+		Insert(builder)
+	maskVal := builder.AllocateInstruction().
+		AsIconst64(interruptCheckInterval - 1).Insert(builder).Return()
+	masked := builder.AllocateInstruction().AsBand(next, maskVal).Insert(builder).Return()
+	brz := builder.AllocateInstruction()
+	brz.AsBrz(masked, ssa.ValuesNil, checkBlk)
+	brz.Insert(builder)
+	builder.AllocateInstruction().AsJump(ssa.ValuesNil, afterBlk).Insert(builder)
+	builder.Seal(counterBlk)
+
+	builder.SetCurrentBlock(checkBlk)
+	checkModuleExitCodePtr := builder.AllocateInstruction().
+		AsLoad(c.execCtxPtrValue,
+			wazevoapi.ExecutionContextOffsetCheckModuleExitCodeTrampolineAddress.U32(),
+			ssa.TypeI64,
+		).Insert(builder).Return()
+
+	args := c.allocateVarLengthValues(1, c.execCtxPtrValue)
+	builder.AllocateInstruction().
+		AsCallIndirect(checkModuleExitCodePtr, &c.checkModuleExitCodeSig, args).
+		Insert(builder)
+	builder.AllocateInstruction().AsJump(ssa.ValuesNil, afterBlk).Insert(builder)
+
+	builder.Seal(checkBlk)
+	builder.SetCurrentBlock(afterBlk)
+	builder.Seal(afterBlk)
 }
 
 // insertJumpToBlock inserts a jump instruction to the given block in the current block.

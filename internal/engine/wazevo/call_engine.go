@@ -146,13 +146,14 @@ type (
 		localsSaveAreaPtr uintptr
 		// moduleClosedPtr is the address of the calling module instance's Closed word
 		// (wasm.ModuleInstance.Closed), set per call when ensureTermination is enabled.
-		// Compiled loop back-edges load it and call the checkModuleExitCode trampoline
-		// only when it is non-zero, instead of exiting to Go on every back-edge.
+		// Compiled loop back-edges and function entries load it and call the
+		// checkModuleExitCode trampoline only when it is non-zero, instead of exiting to Go
+		// on every check.
 		moduleClosedPtr uintptr
-		// interruptCounter is incremented by compiled loop back-edges when ensureTermination
-		// is enabled. Every Nth back-edge (see the loop lowering in the frontend package),
-		// compiled code exits to the checkModuleExitCode trampoline even when Closed is
-		// still zero: the exit into Go code is the loop's only safepoint, since the Go
+		// interruptCounter is incremented by compiled loop back-edges and function entries
+		// when ensureTermination is enabled. Every Nth check (see insertTerminationCheck in
+		// the frontend package), compiled code exits to the checkModuleExitCode trampoline
+		// even when Closed is still zero: the exit into Go code is the only safepoint, since the Go
 		// runtime cannot asynchronously preempt goroutines executing wazevo-generated
 		// machine code.
 		interruptCounter uint64
@@ -346,7 +347,7 @@ func (c *callEngine) callWithStack(ctx context.Context, paramResultStack []uint6
 	if ensureTermination {
 		done := m.CloseModuleOnCanceledOrTimeout(ctx)
 		defer done()
-		// The back-edge checks compiled into this module read the Closed word directly:
+		// The termination checks compiled into this module read the Closed word directly:
 		// it is the same fact FailIfClosed asks, and it is written atomically by whoever
 		// closes the module -- the watchdog above, a context cancellation, or an explicit
 		// CloseWithExitCode from another goroutine.
