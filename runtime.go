@@ -7,7 +7,6 @@ import (
 
 	"github.com/tetratelabs/wazero/api"
 	experimentalapi "github.com/tetratelabs/wazero/experimental"
-	"github.com/tetratelabs/wazero/internal/engine/interpreter"
 	"github.com/tetratelabs/wazero/internal/engine/wazevo"
 	"github.com/tetratelabs/wazero/internal/expctxkeys"
 	"github.com/tetratelabs/wazero/internal/platform"
@@ -163,8 +162,8 @@ func NewRuntimeWithConfig(ctx context.Context, rConfig RuntimeConfig) Runtime {
 	if configEngine == nil {
 		if configKind == engineKindCompiler {
 			configEngine = wazevo.NewEngine
-		} else {
-			configEngine = interpreter.NewEngine
+		} else if configEngine = interpreterEngine; configEngine == nil {
+			panic("wazero: the interpreter is excluded by the wazero_nointerp build tag")
 		}
 	}
 	var engine wasm.Engine

@@ -1,3 +1,5 @@
+//go:build !wazero_nodwarf
+
 package wasmdebug
 
 import (
@@ -23,6 +25,12 @@ type DWARFLines struct {
 type line struct {
 	addr uint64
 	pos  dwarf.LineReaderPos
+}
+
+// ParseDWARFLines returns DWARFLines for the given DWARF custom sections.
+func ParseDWARFLines(abbrev, info, line, ranges, str []byte) *DWARFLines {
+	d, _ := dwarf.New(abbrev, nil, nil, info, line, nil, ranges, str)
+	return NewDWARFLines(d)
 }
 
 // NewDWARFLines returns DWARFLines for the given *dwarf.Data.

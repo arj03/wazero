@@ -1,3 +1,5 @@
+//go:build !wazero_nodwarf
+
 package wasmdebug_test
 
 import (
