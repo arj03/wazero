@@ -158,11 +158,16 @@ var i8x16LogicalSHRMaskTable = [8 * 16]byte{ // (the number of possible shift am
 }
 
 func (m *machine) lowerVUshri8x16(x, y, ret ssa.Value) {
+	shiftAmt := m.getOperand_Mem_Imm32_Reg(m.c.ValueDefinition(y))
+	if shiftAmt.kind == operandKindImm32 {
+		amt := shiftAmt.imm32() & 0x7
+		m.lowerVi8x16ShiftImm(x, ret, sseOpcodePsrlw, amt, byte(0xff>>amt))
+		return
+	}
 	tmpGpReg := m.c.AllocateVReg(ssa.TypeI32)
 	// Load the modulo 8 mask to tmpReg.
 	m.lowerIconst(tmpGpReg, 0x7, false)
 	// Take the modulo 8 of the shift amount.
-	shiftAmt := m.getOperand_Mem_Imm32_Reg(m.c.ValueDefinition(y))
 	m.insert(m.allocateInstr().asAluRmiR(aluRmiROpcodeAnd, shiftAmt, tmpGpReg, false))
 
 	_xx := m.getOperand_Reg(m.c.ValueDefinition(x))
@@ -295,12 +300,18 @@ func (m *machine) lowerShr(x, y, ret ssa.Value, lane ssa.VecLane, signed bool) {
 	_xx := m.getOperand_Reg(m.c.ValueDefinition(x))
 	xx := m.copyToTmp(_xx.reg())
 
+	shiftAmt := m.getOperand_Mem_Imm32_Reg(m.c.ValueDefinition(y))
+	if shiftAmt.kind == operandKindImm32 {
+		m.insert(m.allocateInstr().asXmmRmiReg(shiftOp, newOperandImm32(shiftAmt.imm32()&uint32(modulo)), xx))
+		m.copyTo(xx, m.c.VRegOf(ret))
+		return
+	}
+
 	tmpGpReg := m.c.AllocateVReg(ssa.TypeI32)
 	// Load the modulo 8 mask to tmpReg.
 	m.lowerIconst(tmpGpReg, modulo, false)
 	// Take the modulo 8 of the shift amount.
-	m.insert(m.allocateInstr().asAluRmiR(aluRmiROpcodeAnd,
-		m.getOperand_Mem_Imm32_Reg(m.c.ValueDefinition(y)), tmpGpReg, false))
+	m.insert(m.allocateInstr().asAluRmiR(aluRmiROpcodeAnd, shiftAmt, tmpGpReg, false))
 	// And move it to a xmm register.
 	tmpVec := m.c.AllocateVReg(ssa.TypeV128)
 	m.insert(m.allocateInstr().asGprToXmm(sseOpcodeMovd, newOperandReg(tmpGpReg), tmpVec, false))
@@ -308,6 +319,23 @@ func (m *machine) lowerShr(x, y, ret ssa.Value, lane ssa.VecLane, signed bool) {
 	// Then do the actual shift.
 	m.insert(m.allocateInstr().asXmmRmiReg(shiftOp, newOperandReg(tmpVec), xx))
 
+	m.copyTo(xx, m.c.VRegOf(ret))
+}
+
+// lowerVi8x16ShiftImm lowers an i8x16 shift by the constant amt: amd64 has no byte shift, so
+// the word shift `op` moves bits across byte boundaries, and `mask` (one byte, repeated)
+// clears them.
+func (m *machine) lowerVi8x16ShiftImm(x, ret ssa.Value, op sseOpcode, amt uint32, mask byte) {
+	_xx := m.getOperand_Reg(m.c.ValueDefinition(x))
+	xx := m.copyToTmp(_xx.reg())
+	m.insert(m.allocateInstr().asXmmRmiReg(op, newOperandImm32(amt), xx))
+
+	half := uint64(mask) * 0x0101010101010101
+	l, pos := m.allocateLabel()
+	m.consts = append(m.consts, _const{lo: half, hi: half, label: l, labelPos: pos})
+	tmp := m.c.AllocateVReg(ssa.TypeV128)
+	m.insert(m.allocateInstr().asXmmUnaryRmR(sseOpcodeMovdqu, newOperandMem(m.newAmodeRipRel(l)), tmp))
+	m.insert(m.allocateInstr().asXmmRmR(sseOpcodePand, newOperandReg(tmp), xx))
 	m.copyTo(xx, m.c.VRegOf(ret))
 }
 
@@ -333,6 +361,20 @@ func (m *machine) lowerVIshl(x, y, ret ssa.Value, lane ssa.VecLane) {
 		panic(fmt.Sprintf("invalid lane type: %s", lane))
 	}
 
+	shiftAmt := m.getOperand_Mem_Imm32_Reg(m.c.ValueDefinition(y))
+	if shiftAmt.kind == operandKindImm32 {
+		amt := shiftAmt.imm32() & uint32(modulo)
+		if isI8x16 {
+			m.lowerVi8x16ShiftImm(x, ret, shiftOp, amt, byte(0xff<<amt))
+			return
+		}
+		_xx := m.getOperand_Reg(m.c.ValueDefinition(x))
+		xx := m.copyToTmp(_xx.reg())
+		m.insert(m.allocateInstr().asXmmRmiReg(shiftOp, newOperandImm32(amt), xx))
+		m.copyTo(xx, m.c.VRegOf(ret))
+		return
+	}
+
 	_xx := m.getOperand_Reg(m.c.ValueDefinition(x))
 	xx := m.copyToTmp(_xx.reg())
 
@@ -340,8 +382,7 @@ func (m *machine) lowerVIshl(x, y, ret ssa.Value, lane ssa.VecLane) {
 	// Load the modulo 8 mask to tmpReg.
 	m.lowerIconst(tmpGpReg, modulo, false)
 	// Take the modulo 8 of the shift amount.
-	m.insert(m.allocateInstr().asAluRmiR(aluRmiROpcodeAnd,
-		m.getOperand_Mem_Imm32_Reg(m.c.ValueDefinition(y)), tmpGpReg, false))
+	m.insert(m.allocateInstr().asAluRmiR(aluRmiROpcodeAnd, shiftAmt, tmpGpReg, false))
 	// And move it to a xmm register.
 	tmpVec := m.c.AllocateVReg(ssa.TypeV128)
 	m.insert(m.allocateInstr().asGprToXmm(sseOpcodeMovd, newOperandReg(tmpGpReg), tmpVec, false))

@@ -3410,6 +3410,31 @@ func (m *machine) lowerSplat(x, ret ssa.Value, lane ssa.VecLane) {
 }
 
 func (m *machine) lowerShuffle(x, y ssa.Value, lo, hi uint64, ret ssa.Value) {
+	// One source, as a rotate or byte swap of one vector is: one PSHUFB.
+	fromX, fromY := true, true
+	for i := 0; i < 8; i++ {
+		for _, lane := range [2]byte{byte(lo >> (i * 8)), byte(hi >> (i * 8))} {
+			fromX = fromX && lane < 16
+			fromY = fromY && lane >= 16
+		}
+	}
+	if fromX || fromY || x == y {
+		src := x
+		if fromY {
+			src = y
+		}
+		const mod = 0x0f0f0f0f0f0f0f0f // every lane index into the one source
+		l, pos := m.allocateLabel()
+		m.consts = append(m.consts, _const{lo: lo & mod, hi: hi & mod, label: l, labelPos: pos})
+		ss := m.getOperand_Reg(m.c.ValueDefinition(src))
+		tmpS := m.copyToTmp(ss.reg())
+		tmp := m.c.AllocateVReg(ssa.TypeV128)
+		m.insert(m.allocateInstr().asXmmUnaryRmR(sseOpcodeMovdqu, newOperandMem(m.newAmodeRipRel(l)), tmp))
+		m.insert(m.allocateInstr().asXmmRmR(sseOpcodePshufb, newOperandReg(tmp), tmpS))
+		m.copyTo(tmpS, m.c.VRegOf(ret))
+		return
+	}
+
 	var xMask, yMask [2]uint64
 	for i := 0; i < 8; i++ {
 		loLane := byte(lo >> (i * 8))
